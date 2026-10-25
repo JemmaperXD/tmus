@@ -1,0 +1,245 @@
+use crate::config::WriteOptions;
+use crate::id3::v2::error::FrameParseError;
+use crate::id3::v2::frame::content::verify_encoding;
+use crate::id3::v2::frame::error::FrameEncodingError;
+use crate::id3::v2::header::Id3v2Version;
+use crate::id3::v2::{FrameFlags, FrameHeader, FrameId};
+use crate::util::text::{TextDecodeOptions, TextEncoding, decode_text};
+
+use std::borrow::Cow;
+use std::io::Read;
+
+use byteorder::ReadBytesExt;
+
+/// An `ID3v2` key-value frame
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct KeyValueFrame<'a> {
+	pub(crate) header: FrameHeader<'a>,
+	/// The encoding of the text
+	pub encoding: TextEncoding,
+	/// The key value pairs. Keys can be specified multiple times
+	pub key_value_pairs: Cow<'a, [(Cow<'a, str>, Cow<'a, str>)]>,
+}
+
+impl<'a> KeyValueFrame<'a> {
+	/// Create a new [`KeyValueFrame`]
+	pub fn new(
+		id: FrameId<'a>,
+		encoding: TextEncoding,
+		key_value_pairs: impl Into<Cow<'a, [(Cow<'a, str>, Cow<'a, str>)]>>,
+	) -> Self {
+		let header = FrameHeader::new(id, FrameFlags::default());
+		Self {
+			header,
+			encoding,
+			key_value_pairs: key_value_pairs.into(),
+		}
+	}
+
+	/// Get the ID for the frame
+	pub fn id(&self) -> &FrameId<'_> {
+		&self.header.id
+	}
+
+	/// Get the flags for the frame
+	pub fn flags(&self) -> FrameFlags {
+		self.header.flags
+	}
+
+	/// Set the flags for the frame
+	pub fn set_flags(&mut self, flags: FrameFlags) {
+		self.header.flags = flags;
+	}
+
+	/// Read an [`KeyValueFrame`] from a slice
+	///
+	/// NOTE: This expects the frame header to have already been skipped
+	///
+	/// # Errors
+	///
+	/// * Unable to decode the text
+	///
+	/// ID3v2.2:
+	///
+	/// * The encoding is not [`TextEncoding::Latin1`] or [`TextEncoding::UTF16`]
+	pub fn parse<R>(
+		reader: &mut R,
+		id: FrameId<'a>,
+		frame_flags: FrameFlags,
+		version: Id3v2Version,
+	) -> Result<Option<Self>, FrameParseError>
+	where
+		R: Read,
+	{
+		let encoding_byte = match reader.read_u8() {
+			Ok(byte) => byte,
+			Err(e) => return Err(FrameParseError::new(Some(id.into_owned()), Box::new(e))),
+		};
+
+		let encoding = match verify_encoding(encoding_byte, version) {
+			Ok(encoding) => encoding,
+			Err(e) => return Err(FrameParseError::new(Some(id.into_owned()), Box::new(e))),
+		};
+
+		let mut values = Vec::new();
+
+		let mut text_decode_options = TextDecodeOptions::new().encoding(encoding).terminated(true);
+
+		// We have to read the first key/value pair separately because it may be the only string with a BOM
+
+		let first_key = match decode_text(reader, text_decode_options) {
+			Ok(key) => key,
+			Err(e) => return Err(FrameParseError::new(Some(id.into_owned()), Box::new(e))),
+		};
+
+		if first_key.bytes_read == 0 {
+			return Ok(None);
+		}
+
+		if encoding == TextEncoding::UTF16 {
+			text_decode_options = text_decode_options.bom(first_key.bom);
+		}
+
+		let first_value = match decode_text(reader, text_decode_options) {
+			Ok(key) => key,
+			Err(e) => return Err(FrameParseError::new(Some(id.into_owned()), Box::new(e))),
+		};
+
+		values.push((
+			Cow::Owned(first_key.content),
+			Cow::Owned(first_value.content),
+		));
+
+		loop {
+			let key = match decode_text(reader, text_decode_options) {
+				Ok(key) => key,
+				Err(e) => return Err(FrameParseError::new(Some(id.into_owned()), Box::new(e))),
+			};
+			let value = match decode_text(reader, text_decode_options) {
+				Ok(key) => key,
+				Err(e) => return Err(FrameParseError::new(Some(id.into_owned()), Box::new(e))),
+			};
+			if key.bytes_read == 0 || value.bytes_read == 0 {
+				break;
+			}
+
+			values.push((Cow::Owned(key.content), Cow::Owned(value.content)));
+		}
+
+		let header = FrameHeader::new(id, frame_flags);
+		Ok(Some(Self {
+			header,
+			encoding,
+			key_value_pairs: Cow::Owned(values),
+		}))
+	}
+
+	/// Convert a [`KeyValueFrame`] to a byte vec
+	///
+	/// # Errors
+	///
+	/// * [`WriteOptions::lossy_text_encoding()`] is disabled and the content cannot be encoded in the specified [`TextEncoding`].
+	pub fn as_bytes(&self, write_options: WriteOptions) -> Result<Vec<u8>, FrameEncodingError> {
+		let mut encoding = self.encoding;
+		if write_options.use_id3v23 {
+			encoding = encoding.to_id3v23();
+		}
+
+		let mut content = vec![encoding as u8];
+
+		for (key, value) in &*self.key_value_pairs {
+			content.append(&mut encoding.encode(key, true, write_options.lossy_text_encoding)?);
+			content.append(&mut encoding.encode(value, true, write_options.lossy_text_encoding)?);
+		}
+		Ok(content)
+	}
+}
+
+impl KeyValueFrame<'_> {
+	pub(crate) fn borrow(&self) -> KeyValueFrame<'_> {
+		KeyValueFrame {
+			header: self.header.borrow(),
+			encoding: self.encoding,
+			key_value_pairs: Cow::Borrowed(&self.key_value_pairs),
+		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use crate::config::WriteOptions;
+	use crate::id3::v2::{FrameFlags, FrameHeader, FrameId, Id3v2Version, KeyValueFrame};
+	use crate::util::text::TextEncoding;
+
+	use std::borrow::Cow;
+
+	const FRAME_ID: FrameId<'static> = FrameId::Valid(Cow::Borrowed("TIPL"));
+
+	fn expected(encoding: TextEncoding) -> KeyValueFrame<'static> {
+		KeyValueFrame {
+			header: FrameHeader::new(FRAME_ID, FrameFlags::default()),
+			encoding,
+			key_value_pairs: Cow::Owned(vec![
+				("producer".into(), "Serial-ATA".into()),
+				("mixer".into(), "lofty-rs".into()),
+			]),
+		}
+	}
+
+	#[test_log::test]
+	fn tipl_decode() {
+		let cont = crate::tag::utils::test_utils::read_path("tests/tags/assets/id3v2/test.tipl");
+
+		let parsed_tipl = KeyValueFrame::parse(
+			&mut &cont[..],
+			FRAME_ID,
+			FrameFlags::default(),
+			Id3v2Version::V4,
+		)
+		.unwrap()
+		.unwrap();
+
+		assert_eq!(parsed_tipl, expected(TextEncoding::Latin1));
+	}
+
+	#[test_log::test]
+	fn tipl_encode() {
+		let encoded = expected(TextEncoding::Latin1)
+			.as_bytes(WriteOptions::default())
+			.unwrap();
+
+		let expected_bytes =
+			crate::tag::utils::test_utils::read_path("tests/tags/assets/id3v2/test.tipl");
+
+		assert_eq!(encoded, expected_bytes);
+	}
+
+	#[test_log::test]
+	fn tipl_decode_utf16() {
+		let cont =
+			crate::tag::utils::test_utils::read_path("tests/tags/assets/id3v2/test_utf16.tipl");
+
+		let parsed_tipl = KeyValueFrame::parse(
+			&mut &cont[..],
+			FRAME_ID,
+			FrameFlags::default(),
+			Id3v2Version::V4,
+		)
+		.unwrap()
+		.unwrap();
+
+		assert_eq!(parsed_tipl, expected(TextEncoding::UTF16));
+	}
+
+	#[test_log::test]
+	fn tipl_encode_utf_16() {
+		let encoded = expected(TextEncoding::UTF16)
+			.as_bytes(WriteOptions::default())
+			.unwrap();
+
+		let expected_bytes =
+			crate::tag::utils::test_utils::read_path("tests/tags/assets/id3v2/test_utf16.tipl");
+
+		assert_eq!(encoded, expected_bytes);
+	}
+}

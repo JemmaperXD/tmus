@@ -1,0 +1,191 @@
+use crate::config::WriteOptions;
+use crate::error::TooMuchDataError;
+use crate::id3::v2::error::FrameParseError;
+use crate::id3::v2::frame::error::FrameEncodingError;
+use crate::id3::v2::header::Id3v2Version;
+use crate::id3::v2::{FrameFlags, FrameHeader, FrameId};
+use crate::picture::{MimeType, Picture, PictureType};
+use crate::util::text::{TextDecodeOptions, TextEncoding};
+
+use std::borrow::Cow;
+use std::io::{Read, Write as _};
+
+use byteorder::{ReadBytesExt as _, WriteBytesExt as _};
+
+const FRAME_ID: FrameId<'static> = FrameId::Valid(Cow::Borrowed("APIC"));
+
+/// An `ID3v2` attached picture frame
+///
+/// This is simply a wrapper around [`Picture`] to include a [`TextEncoding`]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct AttachedPictureFrame<'a> {
+	pub(crate) header: FrameHeader<'a>,
+	/// The encoding of the description
+	pub encoding: TextEncoding,
+	/// The picture itself
+	pub picture: Cow<'a, Picture>,
+}
+
+impl<'a> AttachedPictureFrame<'a> {
+	/// Create a new [`AttachedPictureFrame`]
+	pub fn new(encoding: TextEncoding, picture: impl Into<Cow<'a, Picture>>) -> Self {
+		let header = FrameHeader::new(FRAME_ID, FrameFlags::default());
+		Self {
+			header,
+			encoding,
+			picture: picture.into(),
+		}
+	}
+
+	/// Get the ID for the frame
+	pub fn id(&self) -> FrameId<'_> {
+		FRAME_ID
+	}
+
+	/// Get the flags for the frame
+	pub fn flags(&self) -> FrameFlags {
+		self.header.flags
+	}
+
+	/// Set the flags for the frame
+	pub fn set_flags(&mut self, flags: FrameFlags) {
+		self.header.flags = flags;
+	}
+
+	/// Get an [`AttachedPictureFrame`] from ID3v2 A/PIC bytes:
+	///
+	/// NOTE: This expects *only* the frame content
+	///
+	/// # Errors
+	///
+	/// * There isn't enough data present
+	/// * Unable to decode any of the text
+	///
+	/// ID3v2.2:
+	///
+	/// * The format is not "PNG" or "JPG"
+	pub fn parse<R>(
+		reader: &mut R,
+		frame_flags: FrameFlags,
+		version: Id3v2Version,
+	) -> Result<Self, FrameParseError>
+	where
+		R: Read,
+	{
+		fn parse_inner<'a, R>(
+			reader: &mut R,
+			frame_flags: FrameFlags,
+			version: Id3v2Version,
+		) -> Result<AttachedPictureFrame<'a>, FrameParseError>
+		where
+			R: Read,
+		{
+			let encoding = TextEncoding::try_from(reader.read_u8()?)?;
+
+			let mime_type;
+			if version == Id3v2Version::V2 {
+				let mut format = [0; 3];
+				reader.read_exact(&mut format)?;
+
+				match format {
+					[b'P', b'N', b'G'] => mime_type = Some(MimeType::Png),
+					[b'J', b'P', b'G'] => mime_type = Some(MimeType::Jpeg),
+					_ => {
+						return Err(FrameParseError::message(
+							Some(FRAME_ID),
+							format!("unexpected picture format \"{}\"", format.escape_ascii()),
+						));
+					},
+				}
+			} else {
+				let mime_type_str = crate::util::text::decode_text(
+					reader,
+					TextDecodeOptions::new()
+						.encoding(TextEncoding::Latin1)
+						.terminated(true),
+				)?
+				.text_or_none();
+				mime_type = mime_type_str.map(|mime_type_str| MimeType::from_str(&mime_type_str));
+			}
+
+			let pic_type = PictureType::from_u8(reader.read_u8()?);
+
+			let description = crate::util::text::decode_text(
+				reader,
+				TextDecodeOptions::new().encoding(encoding).terminated(true),
+			)?
+			.text_or_none()
+			.map(Cow::from);
+
+			let mut data = Vec::new();
+			reader.read_to_end(&mut data)?;
+
+			let picture = Picture {
+				pic_type,
+				mime_type,
+				description,
+				data: Cow::from(data),
+			};
+
+			let header = FrameHeader::new(FRAME_ID, frame_flags);
+			Ok(AttachedPictureFrame {
+				header,
+				encoding,
+				picture: Cow::Owned(picture),
+			})
+		}
+
+		parse_inner(reader, frame_flags, version).map_err(|mut e| {
+			e.set_id(FRAME_ID);
+			e
+		})
+	}
+
+	/// Convert an [`AttachedPictureFrame`] to a ID3v2 A/PIC byte Vec
+	///
+	/// NOTE: This does not include the frame header
+	///
+	/// # Errors
+	///
+	/// * Too much data was provided
+	/// * [`WriteOptions::lossy_text_encoding()`] is disabled and the content cannot be encoded in the specified [`TextEncoding`].
+	pub fn as_bytes(&self, write_options: WriteOptions) -> Result<Vec<u8>, FrameEncodingError> {
+		let mut encoding = self.encoding;
+		if write_options.use_id3v23 {
+			encoding = encoding.to_id3v23();
+		}
+
+		let mut data = vec![encoding as u8];
+
+		if let Some(mime_type) = &self.picture.mime_type {
+			data.write_all(mime_type.as_str().as_bytes())?;
+		}
+		data.write_u8(0)?;
+
+		data.write_u8(self.picture.pic_type.as_u8())?;
+
+		data.write_all(&encoding.encode(
+			self.picture.description().unwrap_or(""),
+			true,
+			write_options.lossy_text_encoding,
+		)?)?;
+
+		data.write_all(&self.picture.data)?;
+
+		if data.len() as u64 > u64::from(u32::MAX) {
+			return Err(TooMuchDataError.into());
+		}
+
+		Ok(data)
+	}
+}
+
+impl AttachedPictureFrame<'_> {
+	pub(crate) fn borrow(&self) -> AttachedPictureFrame<'_> {
+		AttachedPictureFrame {
+			header: self.header.borrow(),
+			encoding: self.encoding,
+			picture: Cow::Borrowed(&self.picture),
+		}
+	}
+}

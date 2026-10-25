@@ -1,0 +1,159 @@
+use super::sv4to6::MpcSv4to6Properties;
+use super::sv7::MpcSv7Properties;
+use super::sv8::MpcSv8Properties;
+use super::{MpcFile, MpcProperties, MpcStreamVersion};
+use crate::config::ParseOptions;
+use crate::error::{SizeMismatchError, TagParseError};
+use crate::id3::v2::read::parse_id3v2;
+use crate::id3::{FindId3v2Config, ID3FindResults, find_id3v1, find_id3v2, find_lyrics3v2};
+use crate::musepack::error::MpcParseError;
+use crate::util::io::SeekStreamLen;
+
+use std::io::{Read, Seek, SeekFrom};
+
+pub(super) fn read_from<R>(
+	reader: &mut R,
+	parse_options: ParseOptions,
+) -> Result<MpcFile, MpcParseError>
+where
+	R: Read + Seek,
+{
+	log::debug!("Attempting to read MPC file");
+
+	// Sv4to6 is the default, as it doesn't have a marker like Sv8's b'MPCK' or Sv7's b'MP+'
+	let mut version = MpcStreamVersion::Sv4to6;
+	let mut file = MpcFile::default();
+
+	let mut stream_length = reader.stream_len_hack()?;
+
+	let find_id3v2_config = if parse_options.read_tags {
+		FindId3v2Config::READ_TAG
+	} else {
+		FindId3v2Config::NO_READ_TAG
+	};
+
+	// ID3v2 tags are unsupported in MPC files, but still possible
+	#[allow(unused_variables)]
+	if let Some(ID3FindResults {
+		header,
+		content,
+		range: _,
+	}) = find_id3v2(reader, find_id3v2_config).map_err(TagParseError::from)?
+	{
+		let Some(new_stream_length) = stream_length.checked_sub(u64::from(header.full_tag_size()))
+		else {
+			return Err(SizeMismatchError.into());
+		};
+
+		stream_length = new_stream_length;
+
+		if let Some(content) = content {
+			let reader = &mut &*content;
+
+			let id3v2 = parse_id3v2(reader, header, parse_options).map_err(TagParseError::from)?;
+			file.id3v2_tag = Some(id3v2);
+		}
+	}
+
+	// Save the current position, so we can go back and read the properties after the tags
+	let pos_past_id3v2 = reader.stream_position()?;
+
+	#[allow(unused_variables)]
+	if let Some(ID3FindResults {
+		header,
+		content,
+		range: _,
+	}) = find_id3v1(reader, parse_options.read_tags, parse_options.parsing_mode)
+		.map_err(TagParseError::from)?
+	{
+		file.id3v1_tag = content;
+		let Some(new_stream_length) = stream_length.checked_sub(128) else {
+			return Err(SizeMismatchError.into());
+		};
+
+		stream_length = new_stream_length;
+	}
+
+	if let Some(ID3FindResults {
+		header: _,
+		content: size,
+		range: _,
+	}) = find_lyrics3v2(reader)?
+	{
+		let Some(new_stream_length) = stream_length.checked_sub(u64::from(size)) else {
+			return Err(SizeMismatchError.into());
+		};
+
+		stream_length = new_stream_length;
+	}
+
+	reader.seek(SeekFrom::Current(-32))?;
+
+	if let (tag, Some(header)) = crate::ape::tag::read::read_ape_tag(reader, true, parse_options)
+		.map_err(TagParseError::from)?
+	{
+		file.ape_tag = tag;
+
+		// Seek back to the start of the tag
+		let pos = reader.stream_position()?;
+
+		let tag_size = u64::from(header.size);
+		let Some(tag_start) = pos.checked_sub(tag_size) else {
+			return Err(SizeMismatchError.into());
+		};
+
+		reader.seek(SeekFrom::Start(tag_start))?;
+
+		let Some(new_stream_length) = stream_length.checked_sub(tag_size) else {
+			return Err(SizeMismatchError.into());
+		};
+		stream_length = new_stream_length;
+	}
+
+	// Restore the position of the magic signature
+	reader.seek(SeekFrom::Start(pos_past_id3v2))?;
+
+	let mut header = [0; 4];
+	reader.read_exact(&mut header)?;
+
+	match &header {
+		b"MPCK" => {
+			log::debug!("MPC stream version determined to be 8");
+			version = MpcStreamVersion::Sv8;
+		},
+		[b'M', b'P', b'+', ..] => {
+			log::debug!("MPC stream version determined to be 7");
+
+			// Seek back the extra byte we read
+			reader.seek(SeekFrom::Current(-1))?;
+			version = MpcStreamVersion::Sv7;
+		},
+		_ => {
+			log::warn!("MPC stream version could not be determined, assuming 4-6");
+
+			// We should be reading into the actual content now, seek back
+			reader.seek(SeekFrom::Current(-4))?;
+		},
+	}
+
+	if parse_options.read_properties {
+		match version {
+			MpcStreamVersion::Sv8 => {
+				file.properties =
+					MpcProperties::Sv8(MpcSv8Properties::read(reader, parse_options.parsing_mode)?)
+			},
+			MpcStreamVersion::Sv7 => {
+				file.properties = MpcProperties::Sv7(MpcSv7Properties::read(reader, stream_length)?)
+			},
+			MpcStreamVersion::Sv4to6 => {
+				file.properties = MpcProperties::Sv4to6(MpcSv4to6Properties::read(
+					reader,
+					parse_options.parsing_mode,
+					stream_length,
+				)?)
+			},
+		}
+	}
+
+	Ok(file)
+}

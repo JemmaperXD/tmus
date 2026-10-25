@@ -1,0 +1,289 @@
+//! ID3 specific items
+//!
+//! This covers both [`v1`] (ID3v1) and [`v2`] (ID3v2) tag formats.
+//!
+//! ID3 does things differently than other tags, making them a little more cumbersome to work with.
+//! Check the other modules for important notes and warnings.
+
+pub mod v1;
+pub mod v2;
+
+use crate::config::ParsingMode;
+use crate::error::TextDecodingError;
+use crate::id3::v1::error::Id3v1ParseError;
+use crate::id3::v2::error::Id3v2ParseError;
+use crate::macros::try_vec;
+use crate::util::text::utf8_decode_str;
+use v1::constants::ID3V1_TAG_MARKER;
+use v2::header::Id3v2Header;
+
+use std::io::{Read, Seek, SeekFrom};
+use std::num::ParseIntError;
+use std::ops::{Neg, Range};
+
+#[derive(Debug)]
+pub(crate) struct ID3FindResults<Header, Content> {
+	pub header: Header,
+	pub content: Content,
+	/// The byte range of the tag
+	pub range: Range<u64>,
+}
+
+/// Errors that can occur while parsing Lyrics3v2 tags
+pub struct Lyrics3v2ParseError {
+	source: Box<dyn core::error::Error + Send + Sync + 'static>,
+}
+
+impl core::fmt::Display for Lyrics3v2ParseError {
+	fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+		write!(f, "failed to parse Lyrics3v2 tag")
+	}
+}
+
+impl core::fmt::Debug for Lyrics3v2ParseError {
+	fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+		f.debug_struct("Lyrics3v2ParseError")
+			.finish_non_exhaustive()
+	}
+}
+
+impl core::error::Error for Lyrics3v2ParseError {
+	#[allow(trivial_casts)]
+	fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+		Some(&*self.source as _)
+	}
+}
+
+impl From<std::io::Error> for Lyrics3v2ParseError {
+	fn from(input: std::io::Error) -> Self {
+		Self {
+			source: Box::new(input),
+		}
+	}
+}
+
+impl From<ParseIntError> for Lyrics3v2ParseError {
+	fn from(input: ParseIntError) -> Self {
+		Self {
+			source: Box::new(input),
+		}
+	}
+}
+
+impl From<TextDecodingError> for Lyrics3v2ParseError {
+	fn from(input: TextDecodingError) -> Self {
+		Self {
+			source: Box::new(input),
+		}
+	}
+}
+
+pub(crate) fn find_lyrics3v2<R>(
+	data: &mut R,
+) -> Result<Option<ID3FindResults<(), u32>>, Lyrics3v2ParseError>
+where
+	R: Read + Seek,
+{
+	log::debug!("Searching for a Lyrics3v2 tag");
+
+	let mut size = 0_u32;
+
+	let start = data.seek(SeekFrom::Current(-15))?;
+
+	let mut lyrics3v2 = [0; 15];
+	data.read_exact(&mut lyrics3v2)?;
+
+	if &lyrics3v2[7..] != b"LYRICS200" {
+		return Ok(None);
+	}
+
+	log::warn!("Encountered a Lyrics3v2 tag. This is an outdated format, and will be skipped.");
+
+	let lyrics_size = utf8_decode_str(&lyrics3v2[..7])?;
+	let lyrics_size = lyrics_size.parse::<u32>()?;
+
+	size += lyrics_size;
+
+	data.seek(SeekFrom::Current(i64::from(lyrics_size + 15).neg()))?;
+
+	Ok(Some(ID3FindResults {
+		header: (),
+		content: size,
+		range: start..(start + u64::from(size)),
+	}))
+}
+
+#[allow(unused_variables)]
+pub(crate) fn find_id3v1<R>(
+	data: &mut R,
+	read: bool,
+	parse_mode: ParsingMode,
+) -> Result<Option<ID3FindResults<(), Option<v1::tag::Id3v1Tag>>>, Id3v1ParseError>
+where
+	R: Read + Seek,
+{
+	log::debug!("Searching for an ID3v1 tag");
+
+	let mut id3v1 = None;
+
+	// Reader is too small to contain an ID3v2 tag
+	if data.seek(SeekFrom::End(-128)).is_err() {
+		data.seek(SeekFrom::End(0))?;
+		return Ok(None);
+	}
+
+	let mut id3v1_header = [0; 3];
+	data.read_exact(&mut id3v1_header)?;
+
+	let start = data.seek(SeekFrom::Current(-3))?;
+
+	// No ID3v1 tag found
+	if id3v1_header != ID3V1_TAG_MARKER {
+		data.seek(SeekFrom::End(0))?;
+		return Ok(None);
+	}
+
+	log::debug!("Found an ID3v1 tag, parsing");
+
+	if read {
+		let mut id3v1_tag = [0; 128];
+		data.read_exact(&mut id3v1_tag)?;
+
+		data.seek(SeekFrom::End(-128))?;
+
+		id3v1 = Some(v1::tag::Id3v1Tag::parse(id3v1_tag, parse_mode)?)
+	}
+
+	Ok(Some(ID3FindResults {
+		header: (),
+		content: id3v1,
+		range: start..(start + 128),
+	}))
+}
+
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct FindId3v2Config {
+	pub(crate) read: bool,
+	pub(crate) allowed_junk_window: Option<u64>,
+}
+
+impl FindId3v2Config {
+	pub(crate) const NO_READ_TAG: Self = Self {
+		read: false,
+		allowed_junk_window: None,
+	};
+
+	pub(crate) const READ_TAG: Self = Self {
+		read: true,
+		allowed_junk_window: None,
+	};
+}
+
+/// Attempt to find an ID3v2 tag header from the current position in the stream
+///
+/// If a tag is found, the position of `reader` will be at the end of the tag. Otherwise,
+/// the position will be unchanged.
+pub(crate) fn find_id3v2<R>(
+	reader: &mut R,
+	config: FindId3v2Config,
+) -> Result<Option<ID3FindResults<Id3v2Header, Option<Vec<u8>>>>, Id3v2ParseError>
+where
+	R: Read + Seek,
+{
+	let start = reader.stream_position()?;
+	log::debug!("Searching for an ID3v2 tag at offset: {start}");
+
+	let mut id3v2 = None;
+
+	if let Some(junk_window) = config.allowed_junk_window {
+		let mut id3v2_search_window = reader.by_ref().take(junk_window);
+
+		let Some(id3v2_offset) = find_id3v2_in_junk(&mut id3v2_search_window)? else {
+			reader.seek(SeekFrom::Start(start))?;
+			return Ok(None);
+		};
+
+		log::warn!(
+			"Found a potential ID3v2 tag preceded by junk data, offset: {}",
+			id3v2_offset
+		);
+
+		reader.seek(SeekFrom::Current(-3))?;
+	}
+
+	if let Ok(id3v2_header) = Id3v2Header::parse(reader) {
+		log::debug!("Found an ID3v2 tag, parsing");
+
+		if config.read {
+			let mut tag = try_vec![0; id3v2_header.size as usize]?;
+			reader.read_exact(&mut tag)?;
+
+			id3v2 = Some(tag)
+		} else {
+			reader.seek(SeekFrom::Current(i64::from(id3v2_header.size)))?;
+		}
+
+		if id3v2_header.flags.footer {
+			reader.seek(SeekFrom::Current(10))?;
+		}
+
+		let end = reader.stream_position()?;
+		Ok(Some(ID3FindResults {
+			header: id3v2_header,
+			content: id3v2,
+			range: start..end,
+		}))
+	} else {
+		reader.seek(SeekFrom::Start(start))?;
+		Ok(None)
+	}
+}
+
+/// Searches for an ID3v2 tag in (potential) junk data between the start
+/// of the file and the first frame
+fn find_id3v2_in_junk<R>(reader: &mut R) -> Result<Option<u64>, Id3v2ParseError>
+where
+	R: Read,
+{
+	let bytes = reader.bytes();
+
+	let mut id3v2_header = [0; 3];
+
+	for (index, byte) in bytes.enumerate() {
+		id3v2_header[0] = id3v2_header[1];
+		id3v2_header[1] = id3v2_header[2];
+		id3v2_header[2] = byte?;
+		if id3v2_header == *b"ID3" {
+			return Ok(Some((index - 2) as u64));
+		}
+	}
+
+	Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::config::ParseOptions;
+
+	use std::io::Cursor;
+
+	#[test_log::test]
+	fn find_id3v2_seek_back() {
+		let mut data = [0; 32];
+		data[20..23].copy_from_slice(b"ID3");
+
+		let mut cursor = Cursor::new(data);
+		cursor.seek(SeekFrom::Start(5)).unwrap();
+
+		let mut config = FindId3v2Config::READ_TAG;
+		config.allowed_junk_window = Some(ParseOptions::DEFAULT_MAX_JUNK_BYTES as u64);
+
+		assert!(find_id3v2(&mut cursor, config).unwrap().is_none());
+		assert_eq!(
+			cursor.position(),
+			5,
+			"`find_id3v2` should seek back to the original position"
+		);
+	}
+}

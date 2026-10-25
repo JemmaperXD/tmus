@@ -1,0 +1,97 @@
+//! Items for OGG container formats
+//!
+//! ## File notes
+//!
+//! The only supported tag format is [`VorbisComments`](tag::VorbisComments)
+pub(crate) mod constants;
+pub(crate) mod opus;
+mod picture_storage;
+pub(crate) mod read;
+pub(crate) mod speex;
+pub mod tag;
+pub(crate) mod vorbis;
+
+use crate::error::FileParseError;
+use crate::io::{RevSearchEnd, RevSearchStart};
+use crate::util::io::ReadFindExt;
+
+use std::io::{Read, Seek, SeekFrom};
+
+use ogg_pager::{MAX_CONTENT_SIZE, Page, PageError, PageHeader};
+
+// Exports
+
+pub use opus::OpusFile;
+pub use opus::properties::OpusProperties;
+pub use picture_storage::OggPictureStorage;
+pub use speex::SpeexFile;
+pub use speex::properties::SpeexProperties;
+pub use vorbis::VorbisFile;
+pub use vorbis::properties::VorbisProperties;
+
+fn verify_signature(content: &[u8], sig: &[u8]) -> Result<(), FileParseError> {
+	let sig_len = sig.len();
+
+	if content.len() < sig_len || &content[..sig_len] != sig {
+		return Err(FileParseError::message(
+			None,
+			"file missing magic signature",
+		));
+	}
+
+	Ok(())
+}
+
+/// Find the last page in the OGG stream.
+///
+/// This will leave the reader at the end of the [`Page`].
+fn find_last_page<R>(data: &mut R) -> Result<Page, FileParseError>
+where
+	R: Read + Seek,
+{
+	const PATTERN: &[u8] = b"OggS";
+	const BUFFER_SIZE: u64 = (MAX_CONTENT_SIZE / 4) as u64;
+
+	let header_end = data.stream_position()?;
+
+	// Prior to this point, all implementations only read the header packets. There should *always*
+	// be more pages for the audio data, otherwise the file is invalid.
+	if !data.rfind(PATTERN).buffer_size(BUFFER_SIZE).search()? {
+		return Err(PageError::MissingMagic.into());
+	}
+
+	// In the absolute *worst* case we'll do 3 more retries. Realistically though, the last page in
+	// the stream should be well below the maximum size.
+	let last_page_header;
+	loop {
+		let current_pos = data.stream_position()?;
+
+		match PageHeader::read(data) {
+			Ok(h) => {
+				last_page_header = h;
+				break;
+			},
+			// False positive, keep searching
+			Err(
+				PageError::MissingMagic | PageError::InvalidVersion | PageError::BadSegmentCount,
+			) => {
+				data.seek(SeekFrom::Start(current_pos))?;
+
+				if !data
+					.rfind(PATTERN)
+					.buffer_size(BUFFER_SIZE)
+					.start_pos(RevSearchStart::FromCurrent)
+					.end_pos(RevSearchEnd::Pos(header_end))
+					.search()?
+				{
+					return Err(PageError::MissingMagic.into());
+				}
+				continue;
+			},
+			Err(err) => return Err(err.into()),
+		}
+	}
+
+	data.seek(SeekFrom::Start(last_page_header.start))?;
+	Ok(Page::read(data)?)
+}

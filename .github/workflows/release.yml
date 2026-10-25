@@ -1,0 +1,36 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: system deps
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - name: build
+        run: cargo build --release --offline
+      - name: package
+        run: |
+          mkdir -p dist
+          cp target/release/tmus dist/tmus
+          cp README.md LICENSE dist/
+          cp -r assets dist/
+          tar -czf tmus-${GITHUB_REF_NAME}-x86_64-linux.tar.gz -C dist .
+      - name: upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" tmus-*.tar.gz --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" tmus-*.tar.gz --generate-notes
+          fi

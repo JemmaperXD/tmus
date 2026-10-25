@@ -1,0 +1,18 @@
+[package]
+name = "ogg_pager"
+version = "0.7.2"
+authors = ["Serial <69764315+Serial-ATA@users.noreply.github.com>"]
+description = "A simple OGG page reader"
+keywords = ["ogg", "xiph"]
+categories = ["multimedia", "multimedia::audio", "parser-implementations"]
+include = ["src", "Cargo.toml", "../LICENSE-*"]
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+byteorder = { workspace = true }
+
+[lints]
+workspace = true

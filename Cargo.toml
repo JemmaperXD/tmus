@@ -1,0 +1,28 @@
+[package]
+name = "tmus"
+version = "0.1.0"
+edition = "2021"
+authors = ["JemmaperXD"]
+description = "TUI music player in the spirit of cmus with a large lyrics banner"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/JemmaperXD/tmus"
+keywords = ["music", "tui", "cmus", "player", "lyrics"]
+categories = ["command-line-utilities", "multimedia::audio"]
+
+[dependencies]
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "2.12", features = ["json", "tls"] }
+lofty = "0.25"
+percent-encoding = "2"
+signal-hook = "0.3"
+libc = "0.2"
+dbus = "0.9"
+dbus-crossroads = "0.5"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
