@@ -1,19 +1,16 @@
 # tmus
 
-[![ci](https://github.com/JemmaperXD/tmus/actions/workflows/ci.yml/badge.svg)](https://github.com/JemmaperXD/tmus/actions/workflows/ci.yml)
+![library](assets/library.png)
 
-![tmus library screen](assets/library.png)
+Terminal music player, in the spirit of cmus. Plays through mpv, shows up in
+playerctl through MPRIS, and has a lyrics screen with big letters and cava bars
+behind them.
 
-A TUI music player for Linux, roughly in the spirit of [cmus](https://cmus.github.io/).
-Playback goes through `mpv`, MPRIS is exposed for playerctl and desktop widgets,
-and the lyrics screen draws the current line in large block letters over an
-optional cava spectrum.
-
-There are four screens: Library, Playlist, Browser and Settings.
+Four screens: library, playlist, browser, settings.
 
 ## Install
 
-Prebuilt packages are on the [releases page](https://github.com/JemmaperXD/tmus/releases).
+Packages are on the [releases page](https://github.com/JemmaperXD/tmus/releases).
 
 Debian/Ubuntu:
 
@@ -21,24 +18,24 @@ Debian/Ubuntu:
 sudo apt install ./tmus_0.1.0_amd64.deb
 ```
 
-Any Linux, from the tarball:
+Anything else, from the tarball:
 
 ```sh
 tar -xzf tmus-v0.1.0-x86_64-linux.tar.gz
 ./tmus
 ```
 
-From source you need stable Rust, `mpv` and the D-Bus headers (`dbus` on Arch,
-`libdbus-1-dev` on Debian/Ubuntu). `cava` is optional.
+To build you need stable Rust, mpv and dbus headers (`dbus` on Arch,
+`libdbus-1-dev` on Debian). cava is optional.
 
 ```sh
 cargo build --release --offline
 install -Dm755 target/release/tmus ~/.local/bin/tmus
 ```
 
-Dependencies are vendored in `vendor/`, so the build works without network.
+Crates are vendored in `vendor/`, so the build works offline.
 
-## Run
+## Usage
 
 ```sh
 tmus
@@ -46,8 +43,7 @@ tmus ~/Music
 tmus ~/Music/album/*.flac
 ```
 
-Without arguments it opens `~/Music` (or `~/music`). A single banner frame can be
-rendered without starting the TUI:
+No arguments opens `~/Music` (or `~/music`). To see the banner font alone:
 
 ```sh
 tmus --banner "When you were here before" --width 100 --height 28
@@ -55,110 +51,89 @@ tmus --banner "When you were here before" --width 100 --height 28
 
 ## Keys
 
-| Key | Action |
-| --- | --- |
-| `1` … `4` | Library, playlist, browser, settings |
-| `Tab` | Next library column; on other screens, next screen |
-| `j` / `k`, `↓` / `↑` | Down / up |
-| `g` / `G`, `Home` / `End` | Top / bottom |
-| `Enter`, `x` | Play the selection |
-| `c`, `space` | Pause / resume |
-| `v` | Stop |
-| `b` / `z` | Next / previous track |
-| `B` / `Z` | Next / previous album |
-| `←` / `→`, `h` | Seek ±5 seconds |
-| `,` / `.` | Seek ±1 minute |
-| `s` / `r` | Shuffle / repeat |
-| `Ctrl+R` | Repeat the current track |
-| `/` | Search |
-| `l` | Lyrics screen |
-| `F1`, `?` | Full key table |
-| `q` | Quit |
+```
+1-4            library, playlist, browser, settings
+Tab            next column, or next screen
+j/k, arrows    down/up
+g/G, Home/End  top/bottom
+Enter, x       play
+c, space       pause
+v              stop
+b/z, B/Z       next/prev track, next/prev album
+left/right, h  seek 5 seconds, , and . seek a minute
+s, r           shuffle, repeat
+Ctrl+R         repeat this track
+/              search
+l              lyrics
+F1, ?          full key table
+q              quit
+```
 
-Playback and list bindings can be changed in Settings. Navigation keys stay
-fixed. The rest, including the playlist builder (`Ctrl+N`), tag editor (`:edit`)
-and browser keys, is in `tmus help`.
+Playback and list keys can be remapped in settings, navigation stays fixed.
+`tmus help` has the rest: playlist builder on `Ctrl+N`, tag editor with `:edit`,
+browser keys.
 
-Search has two prefixes: `//word` searches artists and albums, `??word` searches
-titles.
+Search takes `//word` for artists and albums, `??word` for titles.
 
 ## Lyrics
 
-![Lyrics screen](assets/lyrics.png)
+![lyrics](assets/lyrics.png)
 
-tmus first looks for a `.lrc` next to the track, matching either the full
-filename or the song title and artist. It reads `[mm:ss.xx]`, multiple stamps per
-line, `[offset:…]` and enhanced `<mm:ss.xx>` tags. Plain text works too, but it
-does not scroll by itself.
+It looks for a `.lrc` next to the track, by full filename or by title and
+artist. `[mm:ss.xx]`, several stamps per line, `[offset:…]` and `<mm:ss.xx>` all
+work. Plain text too, it just doesn't scroll.
 
-If there is no local file, embedded lyrics are used, then [lrclib.net](https://lrclib.net/)
-is asked and the answer is cached. `r` skips the local file and cache and asks
-again. `Ctrl+S` saves the current lyrics as a `.lrc` file, `Shift+L` hides the
-text but keeps the cava background.
+Without a local file it tries embedded lyrics, then lrclib.net, and caches the
+answer. `r` skips the file and cache and asks again. `Ctrl+S` saves the current
+lyrics as `.lrc`, `Shift+L` hides the text and leaves the cava background.
 
-The banner uses `smblock` for Latin text and a built-in 5×7 font for Cyrillic and
-other characters. The lyric color matches the tab bar.
+Latin text uses smblock, everything else the built-in 5×7 font.
 
 ## Commands
 
-Press `:` for the command line. Unambiguous prefixes work, so `:a` is `:add` and
-`:w` is `:save`.
+`:` opens the command line. Prefixes are enough, so `:a` is `:add` and `:w` is
+`:save`.
 
-| Command | Action |
-| --- | --- |
-| `:add [-l\|-p] PATH` | Add a file, directory or playlist |
-| `:cd [DIR]` | Change the browser directory |
-| `:save [-e] [-l\|-p] FILE` | Save a playlist |
-| `:load [-l] FILE` | Load a playlist |
-| `:edit` | Edit tags and embedded lyrics |
-| `:set KEY=VALUE` | Modes, lyric offset, cava |
-| `:seek N` | Seek to N seconds; `+N` / `-N` are relative |
-| `:view 1` … `:view 4` | Switch screens |
-| `:rescan` | Add new files, drop missing ones |
-| `:help` | Key table |
-| `:quit` | Quit |
+```
+:add [-l|-p] PATH       file, directory or playlist
+:cd [DIR]               browser directory
+:save [-e] [-l|-p] FILE
+:load [-l] FILE
+:edit                   tags and embedded lyrics
+:set KEY=VALUE          modes, offset, cava
+:seek N                 +N and -N are relative
+:view 1..4
+:rescan                 add new files, drop missing
+:help
+:quit
+```
 
-`:set` and `:toggle` accept `repeat`, `shuffle`, `follow`, `continue`,
-`repeat_current`, `aaa_mode`, `play_library`, `show_remaining_time` and `cava`.
-The offset is set with `offset=N`.
+`:set` and `:toggle` take repeat, shuffle, follow, continue, repeat_current,
+aaa_mode, play_library, show_remaining_time and cava. Offset is `offset=N`.
 
 ## MPRIS
 
-tmus takes `org.mpris.MediaPlayer2.tmus` and exposes metadata, play/pause/stop,
-next/previous, seek, shuffle and loop.
+It registers `org.mpris.MediaPlayer2.tmus` with metadata, play/pause/stop,
+next/previous, seek, shuffle and loop, so `playerctl -p tmus play-pause` and
+friends work.
 
-```sh
-playerctl -p tmus status
-playerctl -p tmus metadata
-playerctl -p tmus play-pause
-```
-
-Volume is left to mpv and the system mixer. The MPRIS `Volume` property reports
-100% and ignores writes. If another program holds the name, tmus keeps running
-without MPRIS and retries later.
+Volume stays with mpv and the mixer. MPRIS reports 100% and ignores writes. If
+something else holds the name, tmus keeps running without MPRIS and retries.
 
 ## Files
 
-| Path | Contents |
-| --- | --- |
-| `~/.local/share/tmus/library.json` | Library |
-| `~/.local/share/tmus/playlists/` | Named `.m3u` playlists |
-| `~/.config/tmus/state.json` | Roots, playlist, modes and keys |
-| `~/.cache/tmus/lyrics/` | Lyrics cache |
-| `~/.cache/tmus/cava.conf` | cava config |
+```
+~/.local/share/tmus/library.json
+~/.local/share/tmus/playlists/*.m3u
+~/.config/tmus/state.json
+~/.cache/tmus/lyrics/
+~/.cache/tmus/cava.conf
+```
 
-Paths respect `XDG_DATA_HOME`, `XDG_CONFIG_HOME` and `XDG_CACHE_HOME`.
+XDG variables are respected. One instance at a time, the lock sits in
+`$XDG_RUNTIME_DIR` or `~/.cache/tmus`.
 
-Only one instance can run at a time. The lock lives in `$XDG_RUNTIME_DIR` (or
-`~/.cache/tmus`) and is released when the process exits.
+## Thanks
 
-## Credits
-
-Playback is handled by [mpv](https://mpv.io/). The TUI uses
-[ratatui](https://ratatui.rs/) and [crossterm](https://github.com/crossterm-rs/crossterm).
-Lyrics come from [lrclib.net](https://lrclib.net/). The `smblock` banner font is
-by Sam Hocevar and is distributed under the [WTFPL v2](https://www.wtfpl.net/).
-
-## License
-
-MIT.
+mpv for playback, ratatui and crossterm for the UI, lrclib.net for lyrics, and
+Sam Hocevar for the smblock font (WTFPL v2). MIT.
